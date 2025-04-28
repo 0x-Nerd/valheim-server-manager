@@ -1,0 +1,36 @@
+# Ignore all world backups (they can get huge)
+backups/*
+!backups/.gitkeep
+
+# Ignore all logs
+logs/*
+!logs/.gitkeep
+
+# Ignore all auto-generated backup scripts
+scripts/BackupScripts/*
+!scripts/BackupScripts/.gitkeep
+
+# Ignore all Valheim server install files
+valheim_server/*
+!valheim_server/.gitkeep
+!valheim_server/valheim_data/
+!valheim_server/valheim_data/worlds_local/
+!valheim_server/valheim_data/worlds_local/.gitkeep
+
+# Ignore server binaries and runtime files
+valheim_server/valheim_server.x86_64
+valheim_server/valheim_server.pdb
+valheim_server/unstripped_corlib/
+valheim_server/linux64/
+
+# Ignore SteamCMD install cache if you ever install it inside
+steamcmd/*
+!steamcmd/.gitkeep
+
+# Miscellaneous
+*.log
+*.tar.gz
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
