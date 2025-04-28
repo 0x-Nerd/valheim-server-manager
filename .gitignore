@@ -34,3 +34,6 @@ steamcmd/*
 *.bak
 .DS_Store
 Thumbs.db
+
+# Ignore the Raspberry Pi marker
+scripts/.rpi_ready
