@@ -306,7 +306,7 @@ function generate_new_world() {
     fi
 
     # Build launch flags (include modifiers cleanly)
-    launch_flags="-nographics -batchmode -name \"${server_name}\" -port ${port} -world \"${world_name}\" -password \"${password}\" -public ${public_flag} ${crossplay_flag} ${modifiers_flag}"
+    launch_flags="-nographics -batchmode -name \"${server_name}\" -port ${port} -world \"${world_name}\" -password \"${password}\" -public ${public_flag} ${crossplay_flag} ${modifiers_flag} -savedir \"${WORLD_DIR}\""
 
     # Setup service
     service_name="valheimserver-${world_name}.service"
