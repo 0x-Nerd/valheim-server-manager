@@ -109,7 +109,7 @@ else
 fi
 
 # Set Flag File
-touch ${VALHEIM_DIR}/.rpi_ready
+touch "${VALHEIM_DIR}/.rpi_ready"
 
 echo -e "\n${GREEN}✅ Raspberry Pi environment setup complete!${NC}"
 echo -e "${CYAN}You can now proceed with SteamCMD and Valheim server installation.${NC}"
