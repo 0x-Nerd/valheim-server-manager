@@ -39,6 +39,68 @@ function prepare_directories() {
     echo -e "${GREEN}✅ Required directories prepared.${NC}"
 }
 
+wait_for_server_ready() {
+    set +e # disable exit-on-error for grep/etc
+
+    local world_name="$1"
+    local port="$2"
+    local log_file="${LOG_DIR}/${world_name}_server.log"
+    local max_wait=$((18 * 60)) # 18 minutes total timeout
+    local waited=0
+
+    echo -e "\n${CYAN}Waiting for server '${world_name}' to finish startup and become joinable...${NC}"
+    echo -e "${CYAN}Watching for join code or Steam server open (up to 18 min)…${NC}"
+
+    if [[ ! -f "$log_file" ]]; then
+        echo -e "${RED}❌ Log file not found: ${log_file}${NC}"
+        set -e
+        return 1
+    fi
+
+    while ((waited < max_wait)); do
+        # 1) Cross-play join code?
+        if grep -qE 'registered with join code [0-9]+' "$log_file"; then
+            local last_line join_code
+            last_line=$(grep -E 'registered with join code [0-9]+' "$log_file" | tail -n1)
+            join_code="${last_line##* }"
+            echo -e "\n${GREEN}✅ Server is ready!${NC}"
+            echo -e "${CYAN}Join Code: ${GREEN}${join_code}${NC}"
+            set -e
+            return 0
+        fi
+
+        # 2) Steam-only “Opened Steam server”?
+        if grep -q 'Opened Steam server' "$log_file"; then
+            echo -e "\n${GREEN}✅ Server is ready! Steam-only mode.${NC}"
+            local internal_ip external_ip
+            internal_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "N/A")
+            external_ip=$(curl -s ifconfig.me || echo "N/A")
+            echo -e "${CYAN}Join Information:"
+            echo -e "📡 LAN: ${GREEN}${internal_ip}:${port}${NC}"
+            echo -e "🌍 WAN: ${GREEN}${external_ip}:${port}${NC}"
+            echo -e "${YELLOW}⚠️  Port forwarding required (UDP 2456–2458).${NC}"
+            set -e
+            return 0
+        fi
+
+        sleep 1
+        ((waited++))
+    done
+
+    # 3) Timeout fallback
+    echo -e "\n${YELLOW}ℹ️  No join code or Steam-server line seen in 18 min. Falling back to IP info.${NC}"
+    local internal_ip external_ip
+    internal_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "N/A")
+    external_ip=$(curl -s ifconfig.me || echo "N/A")
+    echo -e "${CYAN}Join Information (fallback):"
+    echo -e "📡 LAN: ${GREEN}${internal_ip}:${port}${NC}"
+    echo -e "🌍 WAN: ${GREEN}${external_ip}:${port}${NC}"
+    echo -e "${YELLOW}⚠️  Port forwarding required (UDP 2456–2458).${NC}"
+
+    set -e
+    return 0
+}
+
 # ============================================================
 # Load Configuration
 # ============================================================
@@ -58,11 +120,14 @@ fi
 prepare_directories
 
 #Load Last Session File
-SESSION_FILE="${SERVER_DIR}/last_session.txt"
+SESSION_FILE="${SCRIPT_DIR}/last_session.txt"
 
 if [[ -f "${SESSION_FILE}" ]]; then
     source "${SESSION_FILE}"
 fi
+
+# Prevent “unbound variable” under set -u
+WORLD_NAME="${WORLD_NAME:-}"
 
 # Dynamic session-built variables
 LOG_FILE="${LOG_DIR}/${WORLD_NAME}_server_start.log"
@@ -75,7 +140,7 @@ LOG_FILE="${LOG_DIR}/${WORLD_NAME}_server_start.log"
 ARCH=$(uname -m)
 
 if [[ "$ARCH" == "aarch64" || "$ARCH" == "armv7l" ]]; then
-    if [[ ! -f "${VALHEIM_DIR}/.rpi_ready" ]]; then
+    if [[ ! -f "${SCRIPT_DIR}/.rpi_ready" ]]; then
         echo -e "${YELLOW}⚡ ARM-based system detected (likely Raspberry Pi).${NC}"
         echo -e "${YELLOW}Running Raspberry Pi setup helper script...${NC}\n"
         bash "${RPI_SETUP_SCRIPT}"
@@ -96,7 +161,7 @@ function wait_for_service_start() {
 
     echo -e "${BLUE}Waiting for service '${service_name}' to become active...${NC}"
 
-    for ((i=1; i<=retries; i++)); do
+    for ((i = 1; i <= retries; i++)); do
         if systemctl is-active --quiet "$service_name"; then
             echo -e "${GREEN}✅ Service '${service_name}' is now active.${NC}"
             return
@@ -113,21 +178,21 @@ function wait_for_service_stop() {
     local wait_time=1
 
     if ! systemctl is-active --quiet "$service_name"; then
-       echo -e "${GREEN}✅ Service '${service_name}' is already fully stopped.${NC}"
+        echo -e "${GREEN}✅ Service '${service_name}' is already fully stopped.${NC}"
         return
     fi
 
-   echo -e "${BLUE}Waiting for service '${service_name}' to fully stop...${NC}"
+    echo -e "${BLUE}Waiting for service '${service_name}' to fully stop...${NC}"
 
-    for ((i=1; i<=retries; i++)); do
+    for ((i = 1; i <= retries; i++)); do
         if ! systemctl is-active --quiet "$service_name"; then
-           echo -e "${GREEN}✅ Service '${service_name}' is now fully stopped.${NC}"
+            echo -e "${GREEN}✅ Service '${service_name}' is now fully stopped.${NC}"
             return
         fi
         sleep $wait_time
     done
 
-   echo -e "${YELLOW}⚠️ Service '${service_name}' is still running after ${retries} seconds. You may want to check manually.${NC}"
+    echo -e "${YELLOW}⚠️ Service '${service_name}' is still running after ${retries} seconds. You may want to check manually.${NC}"
 }
 
 function wait_for_service_status() {
@@ -135,7 +200,7 @@ function wait_for_service_status() {
     local retries=5
     local wait_time=1
 
-    for ((i=1; i<=retries; i++)); do
+    for ((i = 1; i <= retries; i++)); do
         if systemctl list-unit-files --type=service | grep -q "$service_name"; then
             return 0
         fi
@@ -144,7 +209,6 @@ function wait_for_service_status() {
 
     return 1
 }
-
 
 # ============================================================
 # World Management Functions
@@ -216,11 +280,11 @@ function select_world() {
     read -rp "Choose an option: " choice
 
     if [[ "$choice" -ge 1 && "$choice" -lt "$count" ]]; then
-        WORLD_NAME="${worlds[$((choice-1))]}"
+        WORLD_NAME="${worlds[$((choice - 1))]}"
         echo -e "${GREEN}✅ World '${WORLD_NAME}' selected.${NC}"
 
         # Immediately save to last_session.txt
-        echo "WORLD_NAME=${WORLD_NAME}" > "${SESSION_FILE}"
+        echo "WORLD_NAME=${WORLD_NAME}" >"${SESSION_FILE}"
         prompt_continue
     else
         echo -e "${YELLOW}Cancelled. Returning to main menu in 5 seconds...${NC}"
@@ -249,35 +313,69 @@ function generate_new_world() {
     local service_name=""
     local log_file=""
 
-    echo -n "Enter new World Name: "
-    read world_name
-
-    if [[ $existing_worlds -eq 0 ]]; then
-        echo -n "Enter Server Name: "
+    while true; do
+        echo -n "Enter Server Name (display name in Valheim server list): "
         read server_name
-    else
-        echo -e "\n${CYAN}Checking existing Valheim services for Server Name...${NC}"
-        for service in /etc/systemd/system/valheimserver-*.service; do
-            if [[ -f "$service" ]]; then
-                extracted_name=$(grep -oP '(?<=-name ")[^"]*' "$service")
-                if [[ -n "$extracted_name" ]]; then
-                    server_name="$extracted_name"
-                    echo -e "${YELLOW}Reusing Server Name: '${server_name}' (detected from ${service})${NC}"
-                    break
-                fi
-            fi
-        done
 
         if [[ -z "$server_name" ]]; then
-            echo -e "${YELLOW}No valid Server Name found in existing services.${NC}"
-            echo -n "Enter Server Name: "
-            read server_name
+            echo -e "${RED}Server name cannot be empty.${NC}"
+            continue
         fi
+
+        service_file="/etc/systemd/system/valheimserver-${world_name}.service"
+        if [[ -f "$service_file" ]]; then
+            echo -e "${RED}❌ A server config for world '${world_name}' already exists.${NC}"
+        else
+            break
+        fi
+    done
+
+    while true; do
+        echo -n "Enter new World Name (used for save files): "
+        read world_name
+
+        if [[ -z "$world_name" ]]; then
+            echo -e "${RED}World name cannot be empty.${NC}"
+            continue
+        fi
+
+        if [[ -f "${WORLD_DIR}/${world_name}.db" || -f "${WORLD_DIR}/${world_name}.fwl" ]]; then
+            echo -e "${RED}❌ A world with the name '${world_name}' already exists.${NC}"
+        else
+            break
+        fi
+    done
+
+    # Check for used ports
+    shopt -s nullglob
+    service_files=(/etc/systemd/system/valheimserver-*.service)
+    shopt -u nullglob
+
+    if ((${#service_files[@]})); then
+        used_ports=$(grep -h -oP '(?<=-port )\d+' "${service_files[@]}" |
+            sort -nu |
+            paste -sd ', ' -)
+    else
+        used_ports=""
     fi
 
-    echo -n "Enter Port Number (default 2456): "
-    read port
-    port=${port:-2456}
+    if [[ -n "$used_ports" ]]; then
+        echo -e "${YELLOW}⚠️ The following ports are already in use:${NC} ${GREEN}${used_ports}${NC}"
+    else
+        echo -e "${YELLOW}⚠️ No ports in use yet.${NC}"
+    fi
+
+    while true; do
+        echo -n "Enter Port Number (valheim default 2456): "
+        read port
+        port=${port:-2456}
+
+        if echo "$used_ports" | grep -q "^${port}$"; then
+            echo -e "${RED}❌ Port ${port} is already in use. Please choose a different port.${NC}"
+        else
+            break
+        fi
+    done
 
     echo -n "Enter Password (5+ characters): "
     read password
@@ -292,7 +390,7 @@ function generate_new_world() {
 
     # Crossplay Warning
     echo -e "\n${YELLOW}⚠️ WARNING: Enabling Crossplay allows Xbox/PC players to connect, but may cause server instability and crashes.${NC}"
-    echo -e "${YELLOW}Ports 2456-2458 UDP must be fully open. No extra installs needed — FAB support is built-in.${NC}"
+    echo -e "${YELLOW}If you dont not enable crossplay. Ports 2456-2458 UDP or (which ever port number you chose when creating your world) must be opened on your firewall for friends to join NOTE: PC ONLY.${NC}"
     echo -n "Enable Crossplay anyway? (y/n): "
     read crossplay
     if [[ "$crossplay" =~ ^[Yy]$ ]]; then
@@ -305,8 +403,8 @@ function generate_new_world() {
         modifiers_flag="-Modifiers Raids none"
     fi
 
-    # Build launch flags (include modifiers cleanly)
-    launch_flags="-nographics -batchmode -name \"${server_name}\" -port ${port} -world \"${world_name}\" -password \"${password}\" -public ${public_flag} ${crossplay_flag} ${modifiers_flag} -savedir \"${WORLD_DIR}\""
+    # Build launch flags (corrected savedir)
+    launch_flags="-nographics -batchmode -name \"${server_name}\" -port ${port} -world \"${world_name}\" -password \"${password}\" -public ${public_flag} ${crossplay_flag} ${modifiers_flag} -savedir \"${VALHEIM_DIR}/valheim_data\""
 
     # Setup service
     service_name="valheimserver-${world_name}.service"
@@ -342,8 +440,108 @@ EOF
     sudo systemctl enable "${service_name}"
     sudo systemctl start "${service_name}"
 
-    echo -e "\n${GREEN}✅ New world '${world_name}' created and server started successfully!${NC}"
-    echo -e "${CYAN}⚡ Your world seed will be available after the first save completes.${NC}"
+    # Wait for server to finish startup
+    wait_for_server_ready "${world_name}" "${port}"
+
+    echo -e "\n${GREEN}✅ World '${world_name}' created and server started successfully!${NC}"
+
+    prompt_continue
+
+}
+
+function delete_world() {
+    echo -e "\n${RED}⚠️  WARNING: This will permanently delete a world and all related files.${NC}"
+
+    # Build list of valid worlds (must have both .fwl and .db, and no _backup_ in name)
+    mapfile -t world_files < <(
+        find "${WORLD_DIR}" -maxdepth 1 -name "*.fwl" |
+            while read -r fwl_file; do
+                base_name=$(basename "${fwl_file}" .fwl)
+                db_file="${WORLD_DIR}/${base_name}.db"
+                if [[ -f "$db_file" && "$base_name" != *_backup_* ]]; then
+                    echo "$fwl_file"
+                fi
+            done | sort
+    )
+
+    if [[ ${#world_files[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}No valid worlds found to delete.${NC}"
+        prompt_continue
+        return
+    fi
+
+    echo -e "\nAvailable Worlds:"
+    for i in "${!world_files[@]}"; do
+        world_name=$(basename "${world_files[$i]}" .fwl)
+        echo "$((i + 1))) ${world_name}"
+    done
+
+    echo -n -e "\nEnter the number of the world to delete (or 'q' to cancel): "
+    read choice
+
+    if [[ "$choice" == [qQ] ]]; then
+        echo -e "${CYAN}Deletion canceled by user.${NC}"
+        prompt_continue
+        return
+    fi
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > ${#world_files[@]})); then
+        echo -e "${RED}Invalid selection.${NC}"
+        prompt_continue
+        return
+    fi
+
+    del_world=$(basename "${world_files[$((choice - 1))]}" .fwl)
+
+    echo -e "\n${YELLOW}Are you absolutely sure you want to delete world '${del_world}' and all related files? (y/N): ${NC}"
+    read confirm
+
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo -e "${CYAN}Deletion canceled.${NC}"
+        prompt_continue
+        return
+    fi
+
+    # ─── Stop & disable services/timers ─────────────────────────────────────
+    sudo systemctl stop "valheimserver-${del_world}.service" 2>/dev/null || true
+    sudo systemctl disable "valheimserver-${del_world}.service" 2>/dev/null || true
+    sudo systemctl disable "valheim_backup_${del_world}.timer" 2>/dev/null || true
+    sudo systemctl disable "valheim_backup_${del_world}.service" 2>/dev/null || true
+
+    sudo rm -f "/etc/systemd/system/valheimserver-${del_world}.service"
+    sudo rm -f "/etc/systemd/system/valheim_backup_${del_world}.timer"
+    sudo rm -f "/etc/systemd/system/valheim_backup_${del_world}.service"
+
+    # ─── Delete world & backup files ────────────────────────────────────────
+    rm -f "${WORLD_DIR}/${del_world}_backup_auto-"*.fwl 2>/dev/null || true
+    rm -f "${WORLD_DIR}/${del_world}_backup_auto-"*.db 2>/dev/null || true
+    rm -f "${WORLD_DIR}/${del_world}.fwl.old" 2>/dev/null || true
+    rm -f "${WORLD_DIR}/${del_world}.db.old" 2>/dev/null || true
+    rm -f "${WORLD_DIR}/${del_world}.db" "${WORLD_DIR}/${del_world}.fwl"
+    rm -f "${LOG_DIR}/${del_world}_server.log"
+    rm -f "${SCRIPT_DIR}/valheim_auto_backup_${del_world}.sh"
+    rm -f "${BACKUP_DIR}/${del_world}_backup_"*.tar.gz 2>/dev/null || true
+    rm -f "${BACKUP_DIR}/${del_world}_pre-restore_"*.tar.gz 2>/dev/null || true
+
+    # Reload systemd so it forgets the old units
+    sudo systemctl daemon-reload || true
+
+    # ─── Clear any stored “current world” if it was this one ────────────────
+    if [[ -f "$SESSION_FILE" ]]; then
+        # Extract only the world name (right of the =)
+        current_session=$(
+            grep -E '^WORLD_NAME=' "$SESSION_FILE" | cut -d'=' -f2-
+        )
+        if [[ "$current_session" == "$del_world" ]]; then
+            rm -f "$SESSION_FILE" # remove the file entirely
+            WORLD_NAME=""         # clear in-memory
+            echo -e "${YELLOW}Current world '${del_world}' was selected and has been cleared.${NC}"
+        fi
+    fi
+
+    # ─── Final success message ──────────────────────────────────────────────
+    echo -e "${GREEN}World '${del_world}' and all related files have been deleted successfully.${NC}"
+
     prompt_continue
 }
 
@@ -351,30 +549,28 @@ EOF
 # Server Control Functions
 # ============================================================
 
-
 function start_valheim_server() {
     if [[ -z "${WORLD_NAME:-}" ]]; then
         echo -e "${RED}ERROR: No world selected. Cannot start server.${NC}"
         return
     fi
 
-	echo -e "${BLUE}Starting Valheim Server for world: ${WORLD_NAME}${NC}"
+    echo -e "${BLUE}Starting Valheim Server for world: ${WORLD_NAME}${NC}"
 
     SERVICE_NAME="valheimserver-${WORLD_NAME}.service"
 
     if systemctl list-unit-files --type=service | grep -q "$SERVICE_NAME"; then
         sudo systemctl start "$SERVICE_NAME"
-	
-	#Waiting for service to start. Limit failures if checkikng status immediate after start
-	wait_for_service_start "$SERVICE_NAME"
-	sleep 3
+
+        #Waiting for service to start. Limit failures if checkikng status immediate after start
+        wait_for_service_start "$SERVICE_NAME"
+        sleep 3
     else
-	echo -e "${RED}ERROR: Systemd service '$SERVICE_NAME' not found.${NC}"
-	prompt_continue
+        echo -e "${RED}ERROR: Systemd service '$SERVICE_NAME' not found.${NC}"
+        prompt_continue
     fi
 
 }
-
 
 function stop_valheim_server() {
     if [[ -z "${WORLD_NAME:-}" ]]; then
@@ -382,20 +578,19 @@ function stop_valheim_server() {
         return
     fi
 
-	echo -e "${BLUE}Stopping Valheim Server for world: ${WORLD_NAME}${NC}"
+    echo -e "${BLUE}Stopping Valheim Server for world: ${WORLD_NAME}${NC}"
 
     SERVICE_NAME="valheimserver-${WORLD_NAME}.service"
 
     if systemctl list-unit-files --type=service | grep -q "$SERVICE_NAME"; then
         sudo systemctl stop "$SERVICE_NAME"
-	wait_for_service_stop "$SERVICE_NAME"
-	sleep 3
+        wait_for_service_stop "$SERVICE_NAME"
+        sleep 3
     else
-	echo -e "${RED}ERROR: Systemd service '$SERVICE_NAME' not found.${NC}"
-	prompt_continue
+        echo -e "${RED}ERROR: Systemd service '$SERVICE_NAME' not found.${NC}"
+        prompt_continue
     fi
 }
-
 
 function server_status() {
     if [[ -z "${WORLD_NAME:-}" ]]; then
@@ -403,13 +598,13 @@ function server_status() {
         return
     fi
 
-	echo -e "${BLUE}Checking Valheim Server Status for world: ${WORLD_NAME}${NC}"
+    echo -e "${BLUE}Checking Valheim Server Status for world: ${WORLD_NAME}${NC}"
 
     SERVICE_NAME="valheimserver-${WORLD_NAME}.service"
 
     if wait_for_service_status "$SERVICE_NAME"; then
         if sudo systemctl is-active --quiet "$SERVICE_NAME"; then
-	    echo -e "${GREEN}Valheim server '${WORLD_NAME}' is RUNNING.${NC}"
+            echo -e "${GREEN}Valheim server '${WORLD_NAME}' is RUNNING.${NC}"
 
             start_time=$(systemctl show "$SERVICE_NAME" -p ActiveEnterTimestamp | cut -d'=' -f2)
             echo "Started at: ${start_time}"
@@ -417,7 +612,7 @@ function server_status() {
             restart_time=$(systemctl show "$SERVICE_NAME" -p ExecMainStartTimestamp | cut -d'=' -f2)
             echo "Last restart: ${restart_time}"
         else
-           echo -e "${YELLOW}Valheim server '${WORLD_NAME}' is STOPPED.${NC}"
+            echo -e "${YELLOW}Valheim server '${WORLD_NAME}' is STOPPED.${NC}"
 
             stop_time=$(systemctl show "$SERVICE_NAME" -p InactiveEnterTimestamp | cut -d'=' -f2)
             echo "Stopped at: ${stop_time}"
@@ -426,9 +621,9 @@ function server_status() {
             echo "Last restart: ${restart_time}"
         fi
     else
-       echo -e "${RED}ERROR: Systemd service '$SERVICE_NAME' not found after multiple checks.${NC}"
+        echo -e "${RED}ERROR: Systemd service '$SERVICE_NAME' not found after multiple checks.${NC}"
     fi
-		prompt_continue
+    prompt_continue
 }
 
 function view_server_info() {
@@ -467,15 +662,15 @@ function update_server_files() {
     fi
 }
 
-function reboot_server(){
- echo -e "${RED}${BOLD}WARNING: This will immediately reboot the entire server!${NC}"
-               read -rp "Are you sure you want to reboot? (y/n): " confirm
-                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                         sudo reboot
-                 else
-                         echo -e "${YELLOW}Reboot cancelled. Returning to main menu.${NC}"
-                 sleep 2
-                 fi
+function reboot_server() {
+    echo -e "${RED}${BOLD}WARNING: This will immediately reboot the entire server!${NC}"
+    read -rp "Are you sure you want to reboot? (y/n): " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        sudo reboot
+    else
+        echo -e "${YELLOW}Reboot cancelled. Returning to main menu.${NC}"
+        sleep 2
+    fi
 }
 
 # ============================================================
@@ -489,22 +684,28 @@ function backup_world() {
         return
     fi
 
-    echo -e "${CYAN}Creating backup for world: ${WORLD_NAME}${NC}"
+    echo -e "\n${CYAN}========== Creating Backup for World: ${WORLD_NAME} ==========${NC}"
 
     mkdir -p "$BACKUP_DIR"
 
+    local timestamp
     timestamp=$(date +"%Y-%m-%d-%H%M")
-    backup_file="${BACKUP_DIR}/${WORLD_NAME}_backup_${timestamp}.tar.gz"
+    local backup_file="${BACKUP_DIR}/${WORLD_NAME}_backup_${timestamp}.tar.gz"
 
-    # Create tar.gz backup
-    tar -czvf "$backup_file" "${WORLD_DIR}/${WORLD_NAME}.db" "${WORLD_DIR}/${WORLD_NAME}.fwl"
+    # Create tar.gz backup (without full path structure)
+    (
+        cd "${WORLD_DIR}" || exit 1
+        tar -czvf "${backup_file}" "${WORLD_NAME}.db" "${WORLD_NAME}.fwl"
+    )
 
-    echo -e "${GREEN}✅ Backup created: ${backup_file}${NC}"
+    echo -e "\n${GREEN}✅ Backup created: ${backup_file}${NC}"
 
-    # Clean up old backups
+    # Clean up old backups (keep last 10)
+    local backup_count
     backup_count=$(ls "${BACKUP_DIR}/${WORLD_NAME}_backup_"*.tar.gz 2>/dev/null | wc -l)
-    
-    if (( backup_count > 10 )); then
+
+    if ((backup_count > 10)); then
+        local oldest_backup
         oldest_backup=$(ls "${BACKUP_DIR}/${WORLD_NAME}_backup_"*.tar.gz | head -n 1)
         echo -e "${YELLOW}⚡ Too many backups detected. Removing oldest backup: ${oldest_backup}${NC}"
         rm -f "$oldest_backup"
@@ -512,7 +713,6 @@ function backup_world() {
 
     prompt_continue
 }
-
 
 function restore_world() {
     echo -e "\n${CYAN}========== Restore a World Backup ==========${NC}"
@@ -555,13 +755,13 @@ function restore_world() {
             hour=${time_part:0:2}
             minute=${time_part:2:2}
 
-            if (( 10#$hour == 0 )); then
+            if ((10#$hour == 0)); then
                 std_hour=12
                 ampm="AM"
-            elif (( 10#$hour < 12 )); then
+            elif ((10#$hour < 12)); then
                 std_hour=$((10#$hour))
                 ampm="AM"
-            elif (( 10#$hour == 12 )); then
+            elif ((10#$hour == 12)); then
                 std_hour=12
                 ampm="PM"
             else
@@ -571,11 +771,11 @@ function restore_world() {
 
             std_time="${std_hour}:${minute} ${ampm}"
 
-            printf "%-4s %-25s %-12s %-8s\n" "$((i+1)))" "$world_name" "$date_part" "$std_time"
+            printf "%-4s %-25s %-12s %-8s\n" "$((i + 1)))" "$world_name" "$date_part" "$std_time"
         done
 
         if [ ${#all_backups[@]} -gt ${#backups[@]} ]; then
-            echo "$(( ${#backups[@]} + 1 ))) Load more backups..."
+            echo "$((${#backups[@]} + 1))) Load more backups..."
         fi
 
         echo -n -e "\nEnter number to restore (or 'q' to quit): "
@@ -587,7 +787,7 @@ function restore_world() {
             return
         elif [[ "$choice" =~ ^[0-9]+$ ]]; then
             if [ "$choice" -ge 1 ] && [ "$choice" -le "${#backups[@]}" ]; then
-                selected_backup="${backups[$((choice-1))]}"
+                selected_backup="${backups[$((choice - 1))]}"
                 backup_name=$(basename "${selected_backup}")
 
                 echo -e "\n${YELLOW}Selected backup:${NC} ${backup_name}"
@@ -608,7 +808,6 @@ function restore_world() {
 
                     echo -e "\n${CYAN}Restoring backup...${NC}"
                     tar -xzvf "${selected_backup}" -C "${WORLD_DIR}"
-
                     echo -e "\n${CYAN}Starting Valheim server...${NC}"
                     start_valheim_server
 
@@ -618,7 +817,7 @@ function restore_world() {
                 fi
                 prompt_continue
                 return
-            elif [ "$choice" -eq $(( ${#backups[@]} + 1 )) ] && [ ${#all_backups[@]} -gt ${#backups[@]} ]; then
+            elif [ "$choice" -eq $((${#backups[@]} + 1)) ] && [ ${#all_backups[@]} -gt ${#backups[@]} ]; then
                 ((count++))
             else
                 echo -e "${RED}Invalid selection.${NC}"
@@ -699,18 +898,25 @@ function setup_auto_backup() {
             ;;
     esac
 
-    # Ensure BackupScripts directory exists
-    mkdir -p "$backup_scripts_dir"
-
     # Create backup script if not already existing
     if [ ! -f "$backup_script" ]; then
         echo -e "\n${CYAN}Creating dedicated backup script for '${WORLD_NAME}'...${NC}"
-        tee "$backup_script" > /dev/null <<EOF
+        tee "$backup_script" >/dev/null <<EOF
 #!/bin/bash
-source ${SERVER_DIR}/config.conf
+source "/home/steam/valheim-server-manager/scripts/config.conf"
+
 WORLD_NAME="${WORLD_NAME}"
-backup_world
+timestamp=\$(date +"%Y-%m-%d-%H%M")
+backup_file="\${BACKUP_DIR}/\${WORLD_NAME}_backup_\${timestamp}.tar.gz"
+
+mkdir -p "\${BACKUP_DIR}"
+
+(
+    cd "\${WORLD_DIR}" || exit 1
+    tar -czf "\${backup_file}" "\${WORLD_NAME}.db" "\${WORLD_NAME}.fwl"
+)
 EOF
+
         chmod +x "$backup_script"
     else
         echo -e "\n${CYAN}Backup script for '${WORLD_NAME}' already exists. Skipping script creation.${NC}"
@@ -718,7 +924,7 @@ EOF
 
     # Create systemd service
     echo -e "\n${CYAN}Creating backup service for '${WORLD_NAME}'...${NC}"
-    sudo tee "$service_file" > /dev/null <<EOF
+    sudo tee "$service_file" >/dev/null <<EOF
 [Unit]
 Description=Valheim Auto Backup Service for ${WORLD_NAME}
 Wants=network-online.target
@@ -734,7 +940,7 @@ EOF
 
     # Create systemd timer
     echo -e "\n${CYAN}Creating backup timer for '${WORLD_NAME}'...${NC}"
-    sudo tee "$timer_file" > /dev/null <<EOF
+    sudo tee "$timer_file" >/dev/null <<EOF
 [Unit]
 Description=Valheim Auto Backup Timer for ${WORLD_NAME}
 
@@ -753,8 +959,6 @@ EOF
     echo -e "\n${GREEN}✅ Auto-backup for '${WORLD_NAME}' has been set up successfully!${NC}"
     prompt_continue
 }
-
-
 
 function remove_auto_backup() {
     echo -e "\n${CYAN}========== Remove Auto-Backup ==========${NC}"
@@ -805,11 +1009,9 @@ function remove_auto_backup() {
     prompt_continue
 }
 
-
 if [[ "$(basename "$0")" == backup_*.sh ]]; then
     exit 0
 fi
-
 
 # ============================================================
 # Steam and Valheim Management
@@ -864,7 +1066,11 @@ function install_or_update_steamcmd() {
 
     echo -e "\n${CYAN}Creating SteamCMD directory...${NC}"
     mkdir -p "$steamcmd_dir"
-    cd "$steamcmd_dir" || { echo -e "${RED}Failed to access ${steamcmd_dir}. Aborting.${NC}"; prompt_continue; return; }
+    cd "$steamcmd_dir" || {
+        echo -e "${RED}Failed to access ${steamcmd_dir}. Aborting.${NC}"
+        prompt_continue
+        return
+    }
 
     echo -e "\n${CYAN}Downloading latest SteamCMD...${NC}"
     curl -sO https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
@@ -989,79 +1195,111 @@ function main_menu() {
             else
                 WORLD_STATUS="${YELLOW}(Stopped)${NC}"
             fi
-
-            # Auto-Backup Status
-            TIMER_FILE="/etc/systemd/system/valheim_backup_${WORLD_NAME}.timer"
-            if [ -f "$TIMER_FILE" ]; then
-                ON_CALENDAR=$(grep "OnCalendar=" "$TIMER_FILE" | cut -d'=' -f2)
-                case "$ON_CALENDAR" in
-                    "*:0/30")
-                        BACKUP_INTERVAL="Every 30 minutes"
-                        ;;
-                    "hourly")
-                        BACKUP_INTERVAL="Every 1 hour"
-                        ;;
-                    "*:0/180")
-                        BACKUP_INTERVAL="Every 3 hours"
-                        ;;
-                    *)
-                        BACKUP_INTERVAL="Unknown Interval"
-                        ;;
-                esac
-                AUTO_BACKUP_STATUS="${GREEN}ON (${BACKUP_INTERVAL})${NC}"
-            else
-                AUTO_BACKUP_STATUS="${RED}OFF${NC}"
-            fi
-fi
-
-# Find latest backup file (manual or auto)
-LATEST_BACKUP_FILE=$(ls -t "${BACKUP_DIR}/${WORLD_NAME}_backup_"*.tar.gz 2>/dev/null | head -n 1 || true)
-
-if [[ -n "$LATEST_BACKUP_FILE" ]]; then
-    BACKUP_FILENAME=$(basename "$LATEST_BACKUP_FILE")
-
-    if [[ "$BACKUP_FILENAME" =~ _backup_ ]]; then
-        BACKUP_TIMESTAMP_PART="${BACKUP_FILENAME#*_backup_}"
-        BACKUP_TIMESTAMP_PART="${BACKUP_TIMESTAMP_PART%.tar.gz}"
-
-        if [[ -n "$BACKUP_TIMESTAMP_PART" ]]; then
-            BACKUP_DATE=$(echo "$BACKUP_TIMESTAMP_PART" | cut -d'-' -f1-3)
-            BACKUP_TIME=$(echo "$BACKUP_TIMESTAMP_PART" | cut -d'-' -f4)
-
-            HOUR=${BACKUP_TIME:0:2}
-            MINUTE=${BACKUP_TIME:2:2}
-
-            if (( 10#$HOUR == 0 )); then
-                STD_HOUR=12
-                AMPM="AM"
-            elif (( 10#$HOUR < 12 )); then
-                STD_HOUR=$((10#$HOUR))
-                AMPM="AM"
-            elif (( 10#$HOUR == 12 )); then
-                STD_HOUR=12
-                AMPM="PM"
-            else
-                STD_HOUR=$((10#$HOUR - 12))
-                AMPM="PM"
-            fi
-
-            LAST_BACKUP="${BACKUP_DATE} $(printf "%02d" ${STD_HOUR}):${MINUTE} ${AMPM}"
         else
-            LAST_BACKUP="${RED}No Valid Backup Timestamp${NC}"
+            WORLD_STATUS="${YELLOW}(No World Selected)${NC}"
         fi
-    else
-        LAST_BACKUP="${RED}No Backup Data${NC}"
-    fi
-else
-    LAST_BACKUP="${RED}No Backups Found${NC}"
-fi
+
+        #Display Current World Port
+        SERVICE_FILE="/etc/systemd/system/valheimserver-${WORLD_NAME}.service"
+
+        if [[ -f "$SERVICE_FILE" ]]; then
+            ACTUAL_PORT=$(grep -oP '(?<=-port )\d+' "$SERVICE_FILE")
+        else
+            ACTUAL_PORT="${RED}Unknown${NC}"
+        fi
+
+        # Resolve latest join code for current world (safe global use)
+        # ─── at the top of your menu, once per invocation ─────────────────────────────
+        join_code=""
+        log_file="${LOG_DIR}/${WORLD_NAME}_server.log"
+
+        if [[ -f "$log_file" ]]; then
+            # -m1 stops after the first match, 2>/dev/null silences errors,
+            # || : prevents grep’s exit‐1 from killing the script
+            join_code=$(
+                grep -m1 -oP '(?<=registered with join code )\d+' "$log_file" \
+                    2>/dev/null || :
+            )
+        fi
+
+        # Auto-Backup Status
+        TIMER_FILE="/etc/systemd/system/valheim_backup_${WORLD_NAME}.timer"
+        if [ -f "$TIMER_FILE" ]; then
+            ON_CALENDAR=$(grep "OnCalendar=" "$TIMER_FILE" | cut -d'=' -f2)
+            case "$ON_CALENDAR" in
+                "*:0/30")
+                    BACKUP_INTERVAL="Every 30 minutes"
+                    ;;
+                "hourly")
+                    BACKUP_INTERVAL="Every 1 hour"
+                    ;;
+                "*:0/180")
+                    BACKUP_INTERVAL="Every 3 hours"
+                    ;;
+                *)
+                    BACKUP_INTERVAL="Unknown Interval"
+                    ;;
+            esac
+            AUTO_BACKUP_STATUS="${GREEN}ON (${BACKUP_INTERVAL})${NC}"
+        else
+            AUTO_BACKUP_STATUS="${RED}OFF${NC}"
+        fi
+
+        # Find latest backup file (manual or auto)
+        LATEST_BACKUP_FILE=$(ls -t "${BACKUP_DIR}/${WORLD_NAME}_backup_"*.tar.gz 2>/dev/null | head -n 1 || true)
+        # Make sure LAST_BACKUP is always defined
+        LAST_BACKUP=""
+
+        if [[ -n "$LATEST_BACKUP_FILE" ]]; then
+            BACKUP_FILENAME=$(basename "$LATEST_BACKUP_FILE")
+
+            if [[ "$BACKUP_FILENAME" =~ _backup_ ]]; then
+                BACKUP_TIMESTAMP_PART="${BACKUP_FILENAME#*_backup_}"
+                BACKUP_TIMESTAMP_PART="${BACKUP_TIMESTAMP_PART%.tar.gz}"
+
+                if [[ -n "$BACKUP_TIMESTAMP_PART" ]]; then
+                    BACKUP_DATE=$(echo "$BACKUP_TIMESTAMP_PART" | cut -d'-' -f1-3)
+                    BACKUP_TIME=$(echo "$BACKUP_TIMESTAMP_PART" | cut -d'-' -f4)
+
+                    HOUR=${BACKUP_TIME:0:2}
+                    MINUTE=${BACKUP_TIME:2:2}
+
+                    if ((10#$HOUR == 0)); then
+                        STD_HOUR=12
+                        AMPM="AM"
+                    elif ((10#$HOUR < 12)); then
+                        STD_HOUR=$((10#$HOUR))
+                        AMPM="AM"
+                    elif ((10#$HOUR == 12)); then
+                        STD_HOUR=12
+                        AMPM="PM"
+                    else
+                        STD_HOUR=$((10#$HOUR - 12))
+                        AMPM="PM"
+                    fi
+
+                    LAST_BACKUP="${BACKUP_DATE} $(printf "%02d" ${STD_HOUR}):${MINUTE} ${AMPM}"
+                else
+                    LAST_BACKUP="${RED}No Valid Backup Timestamp${NC}"
+                fi
+            else
+                LAST_BACKUP="${RED}No Backup Data${NC}"
+            fi
+        else
+            LAST_BACKUP="${RED}No Backups Found${NC}"
+        fi
 
         # Print Header
         echo -e "${BLUE}========== Valheim Server Manager ==========${NC}"
         echo -e "Internal IP: ${GREEN}${INTERNAL_IP}${NC}"
         echo -e "External IP: ${GREEN}${EXTERNAL_IP}${NC}"
         echo -e "Current World: ${GREEN}${WORLD_NAME}${NC} ${WORLD_STATUS}"
-        echo -e "Main Port: ${GREEN}${SERVER_PORT}${NC}"
+        echo -e "Main Port: ${GREEN}${ACTUAL_PORT}${NC}"
+        if [[ -n "${join_code}" ]]; then
+            echo -e "Join Code: ${GREEN}${join_code}${NC}"
+        else
+            echo -e "Crossplay: ${YELLOW}Not enabled${NC}"
+        fi
         echo -e "Uptime: ${GREEN}${UPTIME}${NC}"
         echo -e "Current Time: ${GREEN}${CURRENT_TIME}${NC}"
         echo -e "Auto-Backup: ${AUTO_BACKUP_STATUS}"
@@ -1069,7 +1307,7 @@ fi
             echo -e "Last Backup: ${CYAN}${LAST_BACKUP}${NC}"
         fi
         echo -e "${BLUE}============================================${NC}"
-        
+
         echo
         echo -e "${CYAN}⚡ Quick Actions${NC}"
         echo "1) Start Server"
@@ -1078,24 +1316,25 @@ fi
 
         echo
         echo -e "${CYAN}🌍 World Actions${NC}"
-	echo "4) List Worlds"
+        echo "4) List Worlds"
         echo "5) Select World"
-	echo "6) Generate New  World"
+        echo "6) Generate New World"
         echo "7) Backup World"
         echo "8) Restore World"
-	echo "9) Enable/Edit Auto Backup"
-        echo "10) Disable Auto Backup"
+        echo "9) Delete World"
+        echo "10) Enable/Edit Auto Backup"
+        echo "11) Disable Auto Backup"
 
         echo
-        echo -e "${CYAN}🛠️ Server Maintenance${NC}"
-        echo "11) Update Server"
-        echo "12) Reboot Server"
-        echo "13) View Server Info"
+        echo -e "${CYAN}🛠️  Server Maintenance${NC}"
+        echo "12) Update Server OS"
+        echo "13) Reboot Server"
+        echo "14) View Server Info"
 
         echo
         echo -e "${CYAN}🎮 Steam/Valheim Management${NC}"
-        echo "14) Install/Update SteamCMD"
-        echo "15) Install/Update Valheim"
+        echo "15) Install/Update SteamCMD"
+        echo "16) Install/Update Valheim"
 
         echo
         echo -e "${CYAN}🚪 Exit${NC}"
@@ -1108,24 +1347,27 @@ fi
             1) start_valheim_server ;;
             2) stop_valheim_server ;;
             3) server_status ;;
-	    4) list_worlds ;;
+            4) list_worlds ;;
             5) select_world ;;
-	    6) generate_new_world ;;
-            7) backup_world ;;       
+            6) generate_new_world ;;
+            7) backup_world ;;
             8) restore_world ;;
-	    9) setup_auto_backup ;;
-	    10) remove_auto_backup ;;
-            11) update_server_files ;;
-            12) reboot_server ;;
-            13) view_server_info ;;
-            14) install_or_update_steamcmd ;;
-            15) install_or_update_valheim_server ;;
+            9) delete_world ;;
+            10) setup_auto_backup ;;
+            11) remove_auto_backup ;;
+            12) update_server_files ;;
+            13) reboot_server ;;
+            14) view_server_info ;;
+            15) install_or_update_steamcmd ;;
+            16) install_or_update_valheim_server ;;
             0) exit 0 ;;
-            *) echo -e "${RED}Invalid option. Please choose a valid number.${NC}"; sleep 2 ;;
+            *)
+                echo -e "${RED}Invalid option. Please choose a valid number.${NC}"
+                sleep 2
+                ;;
         esac
     done
 }
-
 
 # ============================================================
 # Start Program
